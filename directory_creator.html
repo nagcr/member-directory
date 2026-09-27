@@ -152,6 +152,7 @@ entirety.
 -->
 <div id="page-container">
 <center>
+	<h1>NAGCR Member Directory<\/h1>
 	<div>
 		<input type="text" id="search_field" placeholder="Enter Search Terms">
 		<button type="button" style="margin:10px;" id="search_button" onclick="search();">Search Directory<\/button>
@@ -276,7 +277,9 @@ function find_member(search_terms, json_data, thresh_limit) {
 <script type="application\/javascript">
 directory_json =
 `;
-const html_post_json = ";\r\n<\/script>";
+
+let d = new Date();
+const html_post_json = ";\r\n<\/script>\r\n<center>\r\n\tDirectory Last Updated: " + d.toDateString() + "\r\n<\/center>";
 </script>
 <script type="application/javascript">
 /* @license
