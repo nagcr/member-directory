@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Directory PDF Creation Utility</title>
+  <style>
+    :root { color-scheme: light; }
+    body {
+      max-width: 760px;
+      margin: 40px auto;
+      padding: 0 20px;
+      color: #222;
+      font: 16px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    h1 { font-size: 1.8rem; }
+    .panel {
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      padding: 22px;
+      margin-top: 24px;
+    }
+    label { display: block; font-weight: 600; margin-bottom: 8px; }
+    input { display: block; margin: 10px 0 18px; max-width: 100%; }
+    button {
+      border: 0;
+      border-radius: 5px;
+      padding: 11px 17px;
+      background: #174ea6;
+      color: white;
+      font-size: 1rem;
+      cursor: pointer;
+    }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    #status { margin-top: 16px; white-space: pre-wrap; }
+    .note { color: #555; font-size: .92rem; }
+  </style>
+
+  <!-- These libraries run locally in the browser. The page needs internet access
+       to download them unless you replace these URLs with local copies. -->
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js"></script>
+</head>
+<body>
+  <h1>NAGCR Directory PDF Creation Utility</h1>
+  <p>Select the UTF-8 CSV file containing the NAGCR member directory. The utility will
+     apply the same directory-specific privacy and formatting changes as the
+     HTML generator, then create a downloadable PDF.</p>
+
+  <div class="panel">
+    <label for="csv_file">Directory CSV file</label>
+    <input id="csv_file" type="file" accept=".csv,text/csv">
+    <button id="generate_button" type="button" disabled>Generate PDF</button>
+    <div id="status" role="status" aria-live="polite">Choose a CSV file to begin.</div>
+  </div>
+
+  <p class="note">
+    The CSV is processed in your browser. Its contents are not uploaded by this
+    utility. The PDF will contain the member information permitted by the
+    directory rules in the original generator.
+  </p>
+
+<script>
+"use strict";
+
+const fileInput = document.getElementById("csv_file");
+const generateButton = document.getElementById("generate_button");
+const statusBox = document.getElementById("status");
+
+let processedPeople = null;
+
+fileInput.addEventListener("change", async () => {
+  processedPeople = null;
+  generateButton.disabled = true;
+
+  const file = fileInput.files && fileInput.files[0];
+  if (!file) {
+    statusBox.textContent = "Choose a CSV file to begin.";
+    return;
+  }
+
+  try {
+    statusBox.textContent = "Reading and processing CSV…";
+    const csvText = await file.text();
+
+    Papa.parse(csvText, {
+      header: true,
+      skipEmptyLines: true,
+      transformHeader: header => header.trim(),
+      complete: results => {
+        if (results.errors.length) {
+          const errors = results.errors
+            .slice(0, 5)
+            .map(error => `Row ${error.row ?? "?"}: ${error.message}`)
+            .join("\n");
+          statusBox.textContent =
+            "The CSV was read, but Papa Parse reported problems:\n" + errors;
+          return;
+        }
+
+        processedPeople = applyDirectoryRules(results.data)
+          .filter(person => person["Reverse Fullname"])
+          .sort((a, b) =>
+            String(a["Reverse Fullname"]).localeCompare(
+              String(b["Reverse Fullname"]),
+              undefined,
+              { sensitivity: "base" }
+            )
+          );
+
+        if (!processedPeople.length) {
+          statusBox.textContent =
+            "No directory entries were found. Check that the CSV has a 'Reverse Fullname' column.";
+          return;
+        }
+
+        generateButton.disabled = false;
+        statusBox.textContent =
+          `Ready: ${processedPeople.length} directory entries processed.\n` +
+          "Select Generate PDF to create the directory.";
+      },
+      error: error => {
+        statusBox.textContent = "Could not parse the CSV: " + error.message;
+      }
+    });
+  } catch (error) {
+    statusBox.textContent = "Could not read the selected file: " + error.message;
+  }
+});
+
+/*
+ * Preserve the transformations from the original HTML generator.
+ * Important: Papa Parse reads CSV values as strings by default, which keeps
+ * ZIP/postal codes such as 00501 from being converted to numbers.
+ */
+function applyDirectoryRules(people) {
+  return people.map(original => {
+    const person = { ...original };
+
+    // For USA addresses, normalize the country name.
+    if (person.Country === "U. S. A.") {
+      person.Country = "USA";
+    }
+
+    // Restore leading zeroes for 3-, 4-, and 5-digit ZIP/postal codes.
+    if (person["Zip Post Code"] !== undefined &&
+        person["Zip Post Code"] !== null) {
+      const zip = String(person["Zip Post Code"]).trim();
+      if (zip.length === 3) person["Zip Post Code"] = "00" + zip;
+      if (zip.length === 4) person["Zip Post Code"] = "0" + zip;
+    }
+
+    // Non-resident life members: remove contact details except country.
+    if (person["Memb Cat for Web Directory"] === "Non-Resident Member") {
+      person["Memb Cat for Web Directory"] = "Non-Resident Life Member";
+      clearFields(person, [
+        "Address1", "Address2", "City", "State or Province",
+        "Zip Post Code", "Email Address", "Home Phone", "Work Phone",
+        "Cell Phone", "Fax", "Expiry Year", "Expiry Month"
+      ]);
+    }
+
+    // Inactive members: remove contact information and designate former member.
+    if (person.Activity === "I") {
+      person["Memb Cat for Web Directory"] = "Former member";
+      clearFields(person, [
+        "Address1", "Address2", "City", "State or Province", "Country",
+        "Zip Post Code", "Email Address", "Home Phone", "Work Phone",
+        "Cell Phone", "Fax"
+      ]);
+    }
+
+    // Full members do not need the membership-type description.
+    if (person["Memb Cat for Web Directory"] === "North American Member") {
+      person["Memb Cat for Web Directory"] = "";
+    }
+
+    // Members who opted out remain listed, but all personal contact details
+    // are suppressed and the address field displays the original notice.
+    if (person["Opt Out Online List"] === "Yes") {
+      person.Address1 = "Withheld at request of member";
+      clearFields(person, [
+        "Address2", "City", "State or Province", "Zip Post Code",
+        "Country", "Email Address", "Home Phone", "Work Phone",
+        "Cell Phone", "Fax"
+      ]);
+    }
+
+    return person;
+  });
+}
+
+function clearFields(person, fields) {
+  for (const field of fields) person[field] = "";
+}
+
+generateButton.addEventListener("click", () => {
+  if (!processedPeople || !processedPeople.length) return;
+
+  if (!window.jspdf || !window.jspdf.jsPDF) {
+    statusBox.textContent =
+      "The PDF library did not load. Check your internet connection and reload this page.";
+    return;
+  }
+
+  try {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({
+      orientation: "portrait",
+      unit: "pt",
+      format: "letter"
+    });
+
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const margin = 42;
+    const contentWidth = pageWidth - margin * 2;
+    const bottomMargin = 42;
+    let y = margin;
+
+    const today = new Date();
+    const dateLabel = today.toLocaleDateString(undefined, {
+      year: "numeric", month: "long", day: "numeric"
+    });
+
+    function addPageHeading(isFirstPage) {
+      y = margin;
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(isFirstPage ? 19 : 14);
+      doc.text("NAGCR Member Directory", margin, y);
+      y += isFirstPage ? 22 : 18;
+
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(8);
+      doc.setTextColor(90);
+      doc.text(`Directory Last Updated: ${dateLabel}`, margin, y);
+      doc.setTextColor(0);
+      y += 20;
+
+      if (isFirstPage) {
+        doc.setDrawColor(170);
+        doc.line(margin, y, pageWidth - margin, y);
+        y += 14;
+      }
+    }
+
+    function ensureSpace(requiredHeight) {
+      if (y + requiredHeight > pageHeight - bottomMargin) {
+        doc.addPage();
+        addPageHeading(false);
+      }
+    }
+
+    function addTextLine(text, options = {}) {
+      const {
+        bold = false,
+        italic = false,
+        fontSize = 9,
+        indent = 0,
+        gapAfter = 3
+      } = options;
+
+      if (text === undefined || text === null || String(text).trim() === "") {
+        return;
+      }
+
+      doc.setFont("helvetica", bold ? "bold" : italic ? "italic" : "normal");
+      doc.setFontSize(fontSize);
+      const lines = doc.splitTextToSize(
+        String(text),
+        contentWidth - indent
+      );
+      const lineHeight = fontSize * 1.25;
+      ensureSpace(lines.length * lineHeight + gapAfter);
+      doc.text(lines, margin + indent, y);
+      y += lines.length * lineHeight + gapAfter;
+    }
+
+    function makeLocation(person) {
+      const locality = [
+        person.City,
+        person["State or Province"],
+        person["Zip Post Code"]
+      ].filter(value => value && String(value).trim()).join(" ");
+
+      return locality;
+    }
+
+    function addPerson(person) {
+      const name = person["Reverse Fullname"] || "";
+      const area = person["Area Name"] || "";
+      const category = person["Memb Cat for Web Directory"] || "";
+
+      // Estimate the block height so a member entry starts on a fresh page
+      // rather than being split where possible.
+      ensureSpace(72);
+
+      addTextLine(name, { bold: true, fontSize: 10, gapAfter: 2 });
+      addTextLine(area, { bold: true, italic: true, fontSize: 9, gapAfter: 2 });
+      addTextLine(category, { italic: true, fontSize: 8, gapAfter: 2 });
+
+      if (person.Address1) addTextLine(person.Address1);
+      if (person.Address2) addTextLine(person.Address2);
+
+      const locality = makeLocation(person);
+      if (locality) addTextLine(locality);
+      if (person.Country) addTextLine(person.Country);
+
+      if (person["Home Phone"]) addTextLine("Home: " + person["Home Phone"]);
+      if (person["Work Phone"]) addTextLine("Work: " + person["Work Phone"]);
+      if (person["Cell Phone"]) addTextLine("Mobile: " + person["Cell Phone"]);
+      if (person["Email Address"]) addTextLine("Email: " + person["Email Address"]);
+
+      if (person["Expiry Month"] && person["Expiry Year"]) {
+        addTextLine(
+          `Expiration: ${person["Expiry Month"]}/${person["Expiry Year"]}`
+        );
+      }
+
+      y += 7;
+      ensureSpace(1);
+      doc.setDrawColor(220);
+      doc.line(margin, y - 2, pageWidth - margin, y - 2);
+      y += 8;
+    }
+
+    addPageHeading(true);
+    processedPeople.forEach(addPerson);
+
+    const originalName = (fileInput.files[0].name || "directory.csv")
+      .replace(/\.csv$/i, "");
+    const safeName = originalName.replace(/[^a-z0-9_-]+/gi, "_");
+    doc.save(`${safeName}_directory.pdf`);
+
+    statusBox.textContent =
+      `PDF created with ${processedPeople.length} directory entries.`;
+  } catch (error) {
+    console.error(error);
+    statusBox.textContent = "Could not create the PDF: " + error.message;
+  }
+});
+</script>
+</body>
+</html>
